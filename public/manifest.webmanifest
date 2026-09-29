@@ -1,0 +1,12 @@
+{
+  "name": "Tages-, Neuro- & Zyklus-Tracker",
+  "short_name": "NeuroTracker",
+  "description": "Lokaler Tages-, Symptom-, Ernährungs- und Zyklus-Tracker",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0b1119",
+  "theme_color": "#0b1119",
+  "icons": [
+    {"src":"./icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
+}
