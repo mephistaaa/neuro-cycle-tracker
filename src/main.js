@@ -3,7 +3,7 @@ import {cycleInfo,mean} from './cycle.js';
 import {getAllEntries,putEntry,deleteEntry,replaceEntries,getSettings,putSettings} from './db.js';
 import {makeBackupPayload,mergeEntries,chooseBackupsToKeep} from './backup.js';
 import {encryptJson,decryptJson} from './crypto.js';
-import {isDriveConfigured,authorize as authorizeDrive,disconnect as disconnectDrive,isAuthorized as isDriveAuthorized,listBackups,uploadBackup,downloadBackup,deleteDriveFile} from './drive.js';
+import {isDriveConfigured,authorize as authorizeDrive,disconnect as disconnectDrive,isAuthorized as isDriveAuthorized,listBackups,uploadBackup,downloadBackup,deleteDriveFile,backupFolderName} from './drive.js';
 
 const app=document.querySelector('#app'); let entries=[]; let settings=await getSettings();
 let localSaveTimer=null; let localSaveBusy=false; let suppressAutoSave=false; let saveLabelTimer=null;
@@ -27,13 +27,21 @@ app.innerHTML=`<main class="app">
   <div class="backup-panel"><div class="row"><div><h3>Google Drive</h3><p id="driveStatus" class="muted">${isDriveConfigured()?'Nicht verbunden.':'Noch nicht konfiguriert.'}</p></div><span id="driveBadge" class="pill">${isDriveConfigured()?'Offline':'Setup nötig'}</span></div>
     <label>Backup-Passwort<input id="backupPassphrase" type="password" minlength="8" autocomplete="new-password" placeholder="Mindestens 8 Zeichen"></label>
     <label class="checkline"><input id="rememberPassphrase" type="checkbox" ${settings.rememberBackupPassphrase?'checked':''}> Passwort nur auf diesem Gerät merken</label>
-    <p class="muted">Die Drive-Datei wird vor dem Upload im Browser mit AES-256-GCM verschlüsselt. Das Passwort wird nie zu Google übertragen.</p>
+    <p class="muted">Die Sicherungen landen in Google Drive im Ordner <b>${backupFolderName()}</b>. Sie werden vor dem Upload im Browser mit AES-256-GCM verschlüsselt; das Passwort wird nie zu Google übertragen.</p><p class="backup-warning"><b>Wichtig:</b> Ohne dieses Backup-Passwort können die verschlüsselten Sicherungen nicht wiederhergestellt werden. Bewahre es unabhängig vom Handy auf.</p>
     <div class="btns"><button id="driveConnect" class="btn primary">Drive verbinden</button><button id="driveBackupNow" class="btn" disabled>Jetzt sichern</button><button id="driveRefresh" class="btn" disabled>Sicherungen laden</button><button id="driveDisconnect" class="btn" disabled>Trennen</button></div>
     <div class="section"><label>Sicherung auswählen<select id="driveBackupSelect" disabled><option value="">Keine Sicherungen geladen</option></select></label><div id="restorePreview" class="muted section">Wähle eine Sicherung, um Datum und Umfang zu prüfen.</div><div class="btns"><button id="driveRestoreMerge" class="btn" disabled>Zusammenführen</button><button id="driveRestoreReplace" class="btn danger" disabled>Lokale Daten ersetzen</button></div></div>
     <p id="driveLastBackup" class="muted">Noch keine Cloud-Sicherung in dieser Installation.</p>
   </div>
 </div><div id="history"></div></section>
 <section class="card"><h2>Auswertungen</h2><div class="tabs"><button class="tab active" data-tab="time">Zeitreihe</button><button class="tab" data-tab="cycle">Zyklusmuster</button><button class="tab" data-tab="pre">Prämenstruell</button><button class="tab" data-tab="corr">Korrelationen</button></div><div id="analysis"></div></section>
+<div id="searchOverlay" class="search-overlay hidden" aria-hidden="true">
+  <section class="search-panel" role="dialog" aria-modal="true" aria-labelledby="searchTitle">
+    <div class="search-head"><div><h2 id="searchTitle">In der App suchen</h2><p class="muted">Suche z. B. nach „Emotionen“, „Alkohol“, „Trigger“ oder „Zyklus“.</p></div><button id="searchClose" class="icon-btn" type="button" aria-label="Suche schließen">×</button></div>
+    <div class="search-input-wrap"><span aria-hidden="true">🔍</span><input id="appSearchInput" type="search" autocomplete="off" spellcheck="false" placeholder="Begriff eingeben …" aria-label="App durchsuchen"></div>
+    <div id="searchResults" class="search-results" role="listbox"><div class="muted">Tippe einen Begriff ein.</div></div>
+  </section>
+</div>
+<button id="floatingSearch" class="floating-search" type="button" aria-label="In der App suchen" title="Suchen">🔍</button>
 <button id="floatingSave" class="floating-save" type="button" aria-label="Aktuellen Tag jetzt speichern" title="Jetzt lokal speichern">✓</button><div id="floatingSaveLabel" class="floating-save-label">Lokal gespeichert</div>
 </main>`;
 
@@ -42,6 +50,89 @@ for(const g of GROUPS){const sec=document.createElement('div');sec.className='se
 const nutrition=document.createElement('div');nutrition.className='section';nutrition.innerHTML=`<label>Ernährungsweise heute<select id="dietType"><option value="vegan">Vegan</option><option value="vegetarian">Vegetarisch</option><option value="omnivore">Omnivor</option><option value="mixed">Gemischt / nicht eindeutig</option></select></label>`;metricRoot.children[1].appendChild(nutrition);
 const sleepRow=document.createElement('div');sleepRow.className='metric';sleepRow.innerHTML='<label>Schlafstunden<input id="sleepHours" type="number" min="0" max="24" step="0.5" placeholder="7.5"></label>';metricRoot.children[0].insertBefore(sleepRow,metricRoot.children[0].children[1]);
 for(const [k,l] of CONTEXTS){const lab=document.createElement('label');lab.innerHTML=`<input type="checkbox" value="${k}"> ${l}`;document.querySelector('#contexts').appendChild(lab)}
+
+const searchOverlay=document.querySelector('#searchOverlay');
+const searchInput=document.querySelector('#appSearchInput');
+const searchResults=document.querySelector('#searchResults');
+const floatingSearch=document.querySelector('#floatingSearch');
+let searchIndex=[];
+
+function normalizeSearchText(value){
+  return String(value||'').toLocaleLowerCase('de-DE').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+}
+function buildSearchIndex(){
+  const items=[];
+  const seen=new Set();
+  const add=(label,target,category='Bereich')=>{
+    const text=String(label||'').replace(/\s+/g,' ').trim();
+    if(!text||!target)return;
+    const key=category+'|'+text;
+    if(seen.has(key))return;
+    seen.add(key);
+    items.push({label:text,category,target,haystack:normalizeSearchText(category+' '+text)});
+  };
+  document.querySelectorAll('.card > h2, .card .hero h2').forEach(el=>add(el.textContent,el.closest('.card'),'Bereich'));
+  metricRoot.querySelectorAll('.section > h3').forEach(el=>add(el.textContent,el.closest('.section'),'Kategorie'));
+  metricRoot.querySelectorAll('.metric label').forEach(el=>add(el.textContent,el.closest('.metric'),'Eintrag'));
+  document.querySelectorAll('.counter b').forEach(el=>add(el.textContent,el.closest('.counter'),'Zähler'));
+  document.querySelectorAll('#contexts label').forEach(el=>add(el.textContent,el.closest('label'),'Tageskontext'));
+  add('Schlafstunden',document.querySelector('#sleepHours')?.closest('.metric'),'Eintrag');
+  add('Ernährungsweise heute',document.querySelector('#dietType')?.closest('.section'),'Eintrag');
+  add('1. Tag der Regel',document.querySelector('#periodStart')?.closest('label'),'Zyklus');
+  add('Ovulation vermutet',document.querySelector('#ovulationObserved')?.closest('label'),'Zyklus');
+  add('Blutung',document.querySelector('#bleeding')?.closest('.section'),'Zyklus');
+  add('Wohlbefinden',document.querySelector('#wellbeing')?.closest('label'),'Tagesabschluss');
+  add('Energie',document.querySelector('#energy')?.closest('label'),'Tagesabschluss');
+  add('Was war heute auffällig Tagesnotiz Notizen',document.querySelector('#notes')?.closest('label'),'Tagesabschluss');
+  add('Google Drive Backup Sicherung Wiederherstellen',document.querySelector('#driveStatus')?.closest('.backup-panel'),'Daten & Backup');
+  add('JSON Backup CSV Export Import',document.querySelector('#jsonExport')?.closest('.backup-panel'),'Daten & Backup');
+  add('Zeitreihe Zyklusmuster Prämenstruell Korrelationen Auswertungen',document.querySelector('#analysis')?.closest('.card'),'Auswertungen');
+  searchIndex=items;
+}
+function highlightSearchTarget(target){
+  if(!target)return;
+  document.querySelectorAll('.search-highlight').forEach(el=>el.classList.remove('search-highlight'));
+  target.classList.add('search-highlight');
+  target.scrollIntoView({behavior:'smooth',block:'center'});
+  setTimeout(()=>target.classList.remove('search-highlight'),1800);
+}
+function closeSearch(){
+  searchOverlay.classList.add('hidden');
+  searchOverlay.setAttribute('aria-hidden','true');
+  document.body.classList.remove('search-open');
+}
+function openSearch(){
+  buildSearchIndex();
+  searchOverlay.classList.remove('hidden');
+  searchOverlay.setAttribute('aria-hidden','false');
+  document.body.classList.add('search-open');
+  searchInput.value='';
+  searchResults.innerHTML='<div class="muted">Tippe einen Begriff ein.</div>';
+  setTimeout(()=>searchInput.focus(),30);
+}
+function renderSearchResults(){
+  const q=normalizeSearchText(searchInput.value);
+  if(!q){searchResults.innerHTML='<div class="muted">Tippe einen Begriff ein.</div>';return;}
+  const terms=q.split(' ').filter(Boolean);
+  const matches=searchIndex.filter(item=>terms.every(t=>item.haystack.includes(t))).slice(0,24);
+  if(!matches.length){searchResults.innerHTML='<div class="search-empty">Kein Treffer. Versuch einen kürzeren oder allgemeineren Begriff.</div>';return;}
+  searchResults.innerHTML='';
+  for(const item of matches){
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='search-result';
+    button.setAttribute('role','option');
+    button.innerHTML=`<span class="search-result-main">${item.label}</span><span class="search-result-category">${item.category}</span>`;
+    button.addEventListener('click',()=>{const target=item.target;closeSearch();setTimeout(()=>highlightSearchTarget(target),80);});
+    searchResults.appendChild(button);
+  }
+}
+
+floatingSearch.addEventListener('click',openSearch);
+document.querySelector('#searchClose').addEventListener('click',closeSearch);
+searchOverlay.addEventListener('click',e=>{if(e.target===searchOverlay)closeSearch();});
+searchInput.addEventListener('input',renderSearchResults);
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!searchOverlay.classList.contains('hidden'))closeSearch();});
 
 document.querySelectorAll('[data-counter]').forEach(b=>b.addEventListener('click',()=>{const i=document.querySelector('#'+b.dataset.counter);i.value=Math.max(0,Math.min(50,(+i.value||0)+(+b.dataset.delta)));scheduleLocalSave();}));
 document.querySelector('#ovulationObserved').addEventListener('change',e=>document.querySelector('#ovuDetails').classList.toggle('hidden',!e.target.checked));
@@ -124,7 +215,7 @@ if(settings.rememberBackupPassphrase && settings.backupPassphrase) backupPassphr
 if(settings.lastCloudBackupAt) document.querySelector('#driveLastBackup').textContent=`Zuletzt erfolgreich gesichert: ${new Date(settings.lastCloudBackupAt).toLocaleString('de-AT')}`;
 
 function setCloudUi(connected,message=''){
-  document.querySelector('#driveBackupNow').disabled=!connected;
+  document.querySelector('#driveBackupNow').disabled=!connected || backupPassphrase.value.length<8;
   document.querySelector('#driveRefresh').disabled=!connected;
   document.querySelector('#driveDisconnect').disabled=!connected;
   driveBadge.textContent=connected?'Verbunden':(isDriveConfigured()?'Offline':'Setup nötig');
@@ -245,13 +336,14 @@ async function restoreCloud(mode){
 }
 
 document.querySelector('#driveConnect').addEventListener('click',async()=>{
-  try{driveStatus.textContent='Verbinde mit Google Drive …';await authorizeDrive({interactive:true});setCloudUi(true);await refreshCloudBackups({interactive:false});}
+  try{driveStatus.textContent='Verbinde mit Google Drive …';await authorizeDrive({interactive:true});setCloudUi(true,`Google Drive verbunden · Ordner: ${backupFolderName()}`);await refreshCloudBackups({interactive:false});}
   catch(e){setCloudUi(false,`Verbindung fehlgeschlagen: ${e.message}`);}
 });
 document.querySelector('#driveDisconnect').addEventListener('click',()=>{disconnectDrive();setCloudUi(false);cloudBackups=[];driveBackupSelect.innerHTML='<option value="">Nicht verbunden</option>';driveBackupSelect.disabled=true;});
 document.querySelector('#driveBackupNow').addEventListener('click',()=>createCloudBackup({interactive:false,announce:true}));
 document.querySelector('#driveRefresh').addEventListener('click',async()=>{try{await refreshCloudBackups({interactive:false});setCloudUi(true,'Sicherungen aktualisiert.');}catch(e){driveStatus.textContent=e.message;}});
 driveBackupSelect.addEventListener('change',previewSelectedCloudBackup);
+backupPassphrase.addEventListener('input',()=>{document.querySelector('#driveBackupNow').disabled=!isDriveAuthorized() || backupPassphrase.value.length<8;});
 backupPassphrase.addEventListener('change',async()=>{await persistPassphrasePreference();if(driveBackupSelect.value)previewSelectedCloudBackup();});
 document.querySelector('#rememberPassphrase').addEventListener('change',persistPassphrasePreference);
 document.querySelector('#driveRestoreMerge').addEventListener('click',()=>restoreCloud('merge'));
