@@ -1,4 +1,4 @@
-const CACHE = 'neuro-tracker-v3';
+const CACHE = 'neuro-tracker-v5';
 const ASSETS = ['./','./index.html','./manifest.webmanifest','./icon.svg','./src/main.js','./src/style.css','./src/data.js','./src/cycle.js','./src/db.js','./src/config.js','./src/crypto.js','./src/backup.js','./src/drive.js'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS))));
 self.addEventListener('activate', event => event.waitUntil((async()=>{for(const k of await caches.keys())if(k!==CACHE)await caches.delete(k);await self.clients.claim();})()));
